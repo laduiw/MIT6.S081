@@ -299,6 +299,52 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
+// pd a va correspond pa is in a cow page
+int             
+pdcowpage(pagetable_t pagetable, uint64 va)
+{
+  if (va>=MAXVA) return -1;
+  pte_t* pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return -1;
+  if((*pte & PTE_V) == 0)
+    return -1;
+  return (*pte & PTE_F ? 0 : -1);
+}
+
+// give a new page to va, because va corresponding page can not be writen(cow)
+void *
+ cowalloc(pagetable_t pagetable, uint64 va)
+{
+  if (va>=MAXVA) return 0;
+  pte_t *pte = walk(pagetable,va,0);
+  //if (pte == 0) {
+  //  panic("cowalloc: pte not exists");
+  //}
+  //if ((*pte & PTE_V) == 0 || (*pte & PTE_U) == 0) {
+  //  panic("cowalloc: pte permission err");
+  //}
+  uint64 pa_old = walkaddr(pagetable, va);
+  char* pa_new = kalloc();
+  if (pa_new == 0) {
+    //printf("cowalloc: kalloc fails\n");
+    return 0;
+  }
+  memmove(pa_new,(char*)pa_old,PGSIZE);
+  *pte &= ~PTE_V;
+  if (mappages( pagetable,va,PGSIZE,(uint64)pa_new,( (PTE_FLAGS(*pte) | PTE_W) & ~PTE_F ) )!=0)
+  {
+    kfree(pa_new);
+    *pte |= PTE_V;
+    return 0;
+  }
+
+  kfree((char*)PGROUNDDOWN(pa_old));
+  return pa_new;
+}
+
+
+
 // Given a parent process's page table, copy
 // its memory into a child's page table.
 // Copies both the page table and the
@@ -311,7 +357,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
+  //char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -319,14 +365,22 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
+    //*pte &= (~PTE_W);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    if (flags & PTE_W)
+    {
+      flags = (flags | PTE_F) & ~PTE_W;
+      *pte = PA2PTE(pa) | flags;
+    }
+    //if((mem = kalloc()) == 0)
+    //  goto err;
+    //memmove(mem, (char*)pa, PGSIZE);
+    if(mappages(new, i, PGSIZE, (uint64)pa, flags) != 0){
+      //kfree(mem);
+      //uvmunmap(new, 0, i / PGSIZE, 1);
       goto err;
     }
+    change_count(pa,1);
   }
   return 0;
 
@@ -358,6 +412,20 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    pa0 = walkaddr(pagetable, va0);
+    if (pdcowpage(pagetable,va0)==0)
+      pa0 = (uint64)cowalloc(pagetable,va0);
+
+    /*pte_t *pte = walk(pagetable, va0, 0);
+    if (pte == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_V) == 0) {
+      printf("copyout: invalid pte\n");
+      return -1;
+    }
+    if ((*pte & PTE_W) == 0) {
+     // if (cowalloc(pagetable, va0) == 0) {
+        return -1;
+     // }
+    }*/
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
@@ -440,3 +508,4 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
